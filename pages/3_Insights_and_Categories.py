@@ -12,12 +12,21 @@ cat_ws = ws(book, "Categories")
 tx_df = normalize_transactions_df(read_df(tx_ws))
 cat_df = read_df(cat_ws)
 
-# ---- helpers (no .dt) ----
+# -------------------------
+# Helpers (no .dt)
+# -------------------------
 def to_month_str(x) -> str:
     try:
         return x.strftime("%Y-%m")
     except Exception:
         return ""
+
+def month_label(ym: str) -> str:
+    """Convert YYYY-MM -> February 2026"""
+    try:
+        return pd.to_datetime(ym, format="%Y-%m").strftime("%B %Y")
+    except Exception:
+        return ym
 
 def to_day(x):
     try:
@@ -33,11 +42,16 @@ def eur_bdt_text(eur: float, bdt: float) -> str:
 # -------------------------
 st.subheader("➕ Create Category")
 
-existing = set(cat_df["category_name"].dropna().astype(str).str.strip().tolist()) if not cat_df.empty else set()
+existing = (
+    set(cat_df["category_name"].dropna().astype(str).str.strip().tolist())
+    if not cat_df.empty and "category_name" in cat_df.columns
+    else set()
+)
 
 with st.form("cat_form"):
     new_cat = str(st.text_input("Category name") or "")
-    cat_type = st.selectbox("Type", ["Expense", "Income", "Debt", "Debt Payment", "Other"])
+    cat_type_any = st.selectbox("Type", ["Expense", "Income", "Debt", "Debt Payment", "Other"])
+    cat_type = str(cat_type_any)
     add = st.form_submit_button("Add Category")
 
 if add:
@@ -62,7 +76,8 @@ if tx_df.empty:
 
 tx_df["month"] = tx_df["date"].apply(to_month_str)
 
-currency_view = st.radio("Charts currency", ["EUR", "BDT"], horizontal=True)
+currency_view_any = st.radio("Charts currency", ["EUR", "BDT"], horizontal=True)
+currency_view = str(currency_view_any)
 value_col = "amount_eur" if currency_view == "EUR" else "amount_bdt"
 
 # 1) Income vs Expense by month
@@ -85,12 +100,18 @@ st.bar_chart(monthly[["Income", "Expense"]])
 # 2) Expense by category for selected month
 st.subheader(f"🏷️ Expense by Category (Selected Month) ({currency_view})")
 
-months = sorted([m for m in tx_df["month"].unique().tolist() if m], reverse=True)
-if not months:
+months_raw = sorted([m for m in tx_df["month"].unique().tolist() if m], reverse=True)
+if not months_raw:
     st.info("No valid dates found.")
     st.stop()
 
-sel_month = st.selectbox("Month for category analysis", months)
+# Show pretty labels (February 2026), but keep raw YYYY-MM for filtering
+month_map = {month_label(m): m for m in months_raw}
+month_labels = list(month_map.keys())
+
+sel_label_any = st.selectbox("Month for category analysis", month_labels, index=0)
+sel_label = str(sel_label_any)
+sel_month = month_map[sel_label]
 
 m_exp = tx_df[(tx_df["month"] == sel_month) & (tx_df["type"] == "Expense")].copy()
 by_cat = m_exp.groupby("category")[value_col].sum().sort_values(ascending=False)
@@ -107,8 +128,9 @@ daily = tx_df.copy()
 daily["day"] = daily["date"].apply(to_day)
 daily = daily[daily["day"].notna()].copy()
 
-daily["income"] = daily.apply(lambda r: r[value_col] if r["type"] == "Income" else 0.0, axis=1)
-daily["expense"] = daily.apply(lambda r: r[value_col] if r["type"] == "Expense" else 0.0, axis=1)
+# Vectorized (faster than apply(axis=1))
+daily["income"] = daily[value_col].where(daily["type"] == "Income", 0.0)
+daily["expense"] = daily[value_col].where(daily["type"] == "Expense", 0.0)
 
 daily_sum = daily.groupby("day")[["income", "expense"]].sum().sort_index()
 daily_sum["net"] = daily_sum["income"] - daily_sum["expense"]
@@ -126,9 +148,10 @@ debt_df = debt_df[debt_df["day"].notna()].copy()
 if debt_df.empty:
     st.info("No debt entries yet.")
 else:
-    debt_df["signed_amount"] = debt_df.apply(
-        lambda r: r[value_col] if r["type"] == "Debt" else -r[value_col],
-        axis=1
+    # Vectorized signed amount
+    debt_df["signed_amount"] = debt_df[value_col].where(
+        debt_df["type"] == "Debt",
+        -debt_df[value_col]
     )
     remaining = debt_df.groupby("day")["signed_amount"].sum().sort_index().cumsum()
     st.line_chart(remaining)
@@ -157,7 +180,5 @@ else:
 
     st.bar_chart(md_sum[["Debt", "Debt Payment"]])
 
-
 from footer import footer
-
 footer()
